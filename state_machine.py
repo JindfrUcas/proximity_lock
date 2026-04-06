@@ -151,6 +151,10 @@ class StateMachine:
         """强制设置状态"""
         self._change_state(state, reason, trigger_callbacks=False)
 
+    def lock_now(self, reason="离开确认"):
+        """跳过过渡，直接进入锁屏状态"""
+        self._change_state(ProximityState.AWAY, reason, trigger_callbacks=True)
+
     @property
     def status_text(self):
         texts = {

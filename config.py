@@ -49,6 +49,9 @@ DEFAULT_CONFIG = {
     "activity_poll_interval": 0.1, # 活跃阶段轮询本地空闲时间
     "idle_scan_window": 0.35,      # 单次 BLE 采样窗口
     "idle_scan_pause": 0.05,       # 空闲检测阶段两次采样间隔
+    "presence_confirm_samples": 2, # 进入空闲检测后，至少连续几次确认“手机在附近”才开始严格离开判断
+    "presence_confirm_min_rssi": -68,  # 视为“手机就在身边”的最小 RSSI
+    "unconfirmed_away_lock_seconds": 8.0,  # 还未确认手机在附近时，需要持续多久弱信号/无信号才锁屏
 
     # ---- 扫描 ----
     "scan_interval": 2.0,          # discover / calibrate 使用

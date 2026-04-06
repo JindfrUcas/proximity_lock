@@ -150,6 +150,9 @@ class ProximityLockApp:
         self._last_idle_seconds = 0.0
         self._idle_detection_active = False
         self._remote_access_until = 0.0
+        self._presence_armed = False
+        self._presence_confirm_count = 0
+        self._unconfirmed_away_since = None
         self.remote_unlock_service = RemoteUnlockService(
             config,
             can_unlock=self._can_remote_unlock,
@@ -212,7 +215,7 @@ class ProximityLockApp:
             send_notification("ProximityLock", message)
         return True, message
 
-    def _consume_rssi(self, rssi, name):
+    def _consume_rssi(self, rssi, name, update_state_machine=True):
         """统一处理 RSSI 数据"""
         self._current_rssi = rssi
         self._device_name = name
@@ -220,8 +223,58 @@ class ProximityLockApp:
         filtered, is_valid = self.signal_processor.process(rssi)
         self._current_filtered = filtered
 
-        if is_valid and filtered is not None:
+        if update_state_machine and is_valid and filtered is not None:
             self.state_machine.update(filtered)
+        return filtered, is_valid
+
+    def _reset_idle_presence_tracking(self):
+        """重置一次空闲检测周期内的手机在场确认状态"""
+        self._presence_armed = False
+        self._presence_confirm_count = 0
+        self._unconfirmed_away_since = None
+
+    def _presence_confirm_threshold(self):
+        """判定手机“确实在身边”的 RSSI 门槛"""
+        return max(
+            self.config["lock_rssi"] + 6,
+            self.config.get("presence_confirm_min_rssi", self.config["lock_rssi"] + 6),
+        )
+
+    def _arm_presence_if_needed(self, filtered):
+        """只有先确认过手机在附近，后续才允许用短时丢信号做离开判断"""
+        threshold = self._presence_confirm_threshold()
+        if filtered is None:
+            return
+        if filtered >= threshold:
+            self._presence_confirm_count += 1
+            self._unconfirmed_away_since = None
+            if (
+                not self._presence_armed
+                and self._presence_confirm_count >= self.config["presence_confirm_samples"]
+            ):
+                self._presence_armed = True
+                self.state_machine.mark_present("空闲检测确认手机在附近")
+                print(
+                    f"[BLE] 已确认手机在附近（{self._presence_confirm_count} 次, {filtered:.0f}dBm）"
+                )
+        else:
+            self._presence_confirm_count = 0
+
+    def _track_unconfirmed_away(self, reason):
+        """
+        还没确认手机在附近时，不允许 1-2 次扫不到就立刻锁屏。
+        只有持续较长时间都弱信号/无信号，才认定为离开。
+        """
+        now = time.time()
+        if self._unconfirmed_away_since is None:
+            self._unconfirmed_away_since = now
+            return
+
+        elapsed = now - self._unconfirmed_away_since
+        if elapsed >= self.config["unconfirmed_away_lock_seconds"]:
+            self.state_machine.lock_now(
+                f"{reason} 持续 {elapsed:.1f} 秒，判定为离开"
+            )
 
     def _reset_presence_from_local_activity(self):
         """本地有输入时，停止 BLE 检测并静默复位为“人在电脑旁”"""
@@ -235,6 +288,7 @@ class ProximityLockApp:
         self._idle_detection_active = False
         self._current_rssi = None
         self._current_filtered = None
+        self._reset_idle_presence_tracking()
         self.signal_processor.reset()
         self.state_machine.mark_present("检测到本地操作")
 
@@ -247,11 +301,32 @@ class ProximityLockApp:
         if sample is None:
             self._current_rssi = None
             self._current_filtered = self.signal_processor.current_value
-            self.state_machine.update(None)
+            if self._presence_armed:
+                self.state_machine.update(None)
+            else:
+                self._track_unconfirmed_away("空闲检测期间未检测到手机")
             return
 
         rssi, name = sample
-        self._consume_rssi(rssi, name)
+        did_update_state_machine = self._presence_armed
+        filtered, _ = self._consume_rssi(
+            rssi,
+            name,
+            update_state_machine=did_update_state_machine,
+        )
+        self._arm_presence_if_needed(filtered)
+
+        if filtered is None:
+            return
+
+        if self._presence_armed and not did_update_state_machine:
+            self.state_machine.update(filtered)
+        elif filtered < self.config["lock_rssi"]:
+            self._track_unconfirmed_away(
+                f"空闲检测信号偏弱 ({filtered:.0f}dBm < {self.config['lock_rssi']}dBm)"
+            )
+        else:
+            self._unconfirmed_away_since = None
 
     async def run_monitor(self):
         """运行监控主循环"""
@@ -311,6 +386,7 @@ class ProximityLockApp:
 
             if not self._idle_detection_active:
                 self._idle_detection_active = True
+                self._reset_idle_presence_tracking()
                 self.signal_processor.reset()
                 self._current_rssi = None
                 self._current_filtered = None
