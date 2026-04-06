@@ -22,34 +22,15 @@ fi
 
 # 2. 安装依赖
 echo "📦 安装依赖..."
-pip install -r "$SCRIPT_DIR/requirements.txt" -q
-pip install pyinstaller -q
+python3 -m pip install -r "$SCRIPT_DIR/requirements.txt" -q
+python3 -m pip install pyinstaller -q
 
 # 3. 构建 .app
 echo "🔨 构建 $APP_NAME.app ..."
 cd "$SCRIPT_DIR"
 
-pyinstaller \
-    --name "$APP_NAME" \
-    --windowed \
-    --onedir \
-    --noconfirm \
-    --clean \
-    --add-data "config.py:." \
-    --add-data "signal_filter.py:." \
-    --add-data "activity_monitor.py:." \
-    --add-data "remote_auth.py:." \
-    --add-data "state_machine.py:." \
-    --add-data "screen_control.py:." \
-    --add-data "scanner.py:." \
-    --add-data "calibration.py:." \
-    --add-data "gui_setup.py:." \
-    --hidden-import rumps \
-    --hidden-import bleak \
-    --hidden-import numpy \
-    --hidden-import asyncio \
-    --osx-bundle-identifier "com.proximitylock.app" \
-    main.py
+rm -rf "$DIST_DIR" "$SCRIPT_DIR/build"
+python3 -m PyInstaller ProximityLock.spec --noconfirm --clean
 
 # 4. 检查结果
 APP_PATH="$DIST_DIR/$APP_NAME.app"
@@ -74,6 +55,7 @@ if [ -d "$APP_PATH" ]; then
     echo "⚠️ 首次启动注意："
     echo "   1. 如果提示"无法打开"，请右键 → 打开"
     echo "   2. 需要授权蓝牙和辅助功能权限"
+    echo "   3. 若仍无反应，请查看 ~/Library/Logs/ProximityLock/ProximityLock.log"
 else
     echo "❌ 构建失败"
     exit 1

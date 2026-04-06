@@ -47,4 +47,13 @@ app = BUNDLE(
     name='ProximityLock.app',
     icon=None,
     bundle_identifier='com.proximitylock.app',
+    info_plist={
+        'CFBundleDisplayName': 'ProximityLock',
+        'CFBundleName': 'ProximityLock',
+        'CFBundleShortVersionString': '0.1.0',
+        'CFBundleVersion': '1',
+        'LSUIElement': True,
+        'NSBluetoothAlwaysUsageDescription': 'ProximityLock 需要使用蓝牙检测 iPhone 是否在电脑附近，以在离开时自动锁屏。',
+        'NSAppleEventsUsageDescription': 'ProximityLock 需要控制系统事件来锁定屏幕，并在授权后协助执行解锁。',
+    },
 )

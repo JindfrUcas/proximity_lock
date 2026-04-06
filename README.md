@@ -103,3 +103,8 @@ pip install -r requirements.txt
 ```
 
 当前仓库里的 `.app` 目录仅代表历史构建产物，建议每次发布前在目标 Mac 上重新打包。
+如果双击 `.app` 没有明显反应，请查看日志文件：
+
+```bash
+tail -n 100 ~/Library/Logs/ProximityLock/ProximityLock.log
+```

@@ -10,11 +10,14 @@ ProximityLock - macOS 菜单栏应用
 """
 import argparse
 import asyncio
+import atexit
 import signal
 import sys
 import threading
 import time
 import getpass
+import traceback
+from pathlib import Path
 
 from activity_monitor import ActivityMonitor
 from calibration import Calibrator
@@ -43,6 +46,83 @@ except ModuleNotFoundError as exc:
     BLEProximityScanner = None
     discover_and_select = None
     SCANNER_IMPORT_ERROR = exc
+
+try:
+    from gui_setup import SetupWizard, show_alert
+except Exception:
+    SetupWizard = None
+    show_alert = None
+
+
+LOG_FILE_PATH = None
+
+
+class _TeeStream:
+    """将 stdout/stderr 同时写入终端和日志文件"""
+
+    def __init__(self, original, logfile):
+        self.original = original
+        self.logfile = logfile
+
+    def write(self, data):
+        if not data:
+            return 0
+        try:
+            self.original.write(data)
+            self.original.flush()
+        except Exception:
+            pass
+        try:
+            self.logfile.write(data)
+            self.logfile.flush()
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        try:
+            self.original.flush()
+        except Exception:
+            pass
+        try:
+            self.logfile.flush()
+        except Exception:
+            pass
+
+
+def setup_runtime_logging():
+    """把运行日志落到用户目录，方便双击 .app 时排查"""
+    global LOG_FILE_PATH
+
+    if LOG_FILE_PATH is not None:
+        return LOG_FILE_PATH
+
+    try:
+        log_dir = Path.home() / "Library" / "Logs" / "ProximityLock"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "ProximityLock.log"
+        log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = _TeeStream(sys.stdout, log_file)
+        sys.stderr = _TeeStream(sys.stderr, log_file)
+        LOG_FILE_PATH = str(log_path)
+        print(f"\n===== ProximityLock startup {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
+        print(f"[日志] {LOG_FILE_PATH}")
+        print(f"[启动] argv={sys.argv}")
+        atexit.register(lambda: print("===== ProximityLock exit ====="))
+    except Exception:
+        LOG_FILE_PATH = "stdout-only"
+
+    return LOG_FILE_PATH
+
+
+def show_startup_error(message, title="ProximityLock", include_log_hint=True):
+    """在 GUI 模式下尽量用原生对话框提示错误"""
+    full_message = message
+    if include_log_hint and LOG_FILE_PATH:
+        full_message += f"\n\n日志位置:\n{LOG_FILE_PATH}"
+    print(full_message)
+    if show_alert:
+        show_alert(title, full_message)
 
 
 class ProximityLockApp:
@@ -522,6 +602,8 @@ def cmd_show_remote_unlock(config):
 
 
 def main():
+    setup_runtime_logging()
+
     parser = argparse.ArgumentParser(
         description="ProximityLock - iPhone 离开自动锁屏",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -553,27 +635,57 @@ def main():
         config["filter_type"] = args.filter
         config.save()
 
-    if args.discover:
-        asyncio.run(cmd_discover(config))
-    elif args.calibrate:
-        asyncio.run(cmd_calibrate(config))
-    elif args.setup_remote_unlock:
-        cmd_setup_remote_unlock(config)
-    elif args.show_remote_unlock:
-        cmd_show_remote_unlock(config)
-    elif args.set_password:
-        cmd_set_password()
-    elif args.cli:
-        asyncio.run(run_cli_mode(config))
-    else:
-        if not config.get("device_uuid"):
-            print("⚠️ 尚未设置目标设备！")
-            print("\n请先运行以下命令完成初始设置：")
-            print("  python main.py --discover")
-            print("  python main.py --calibrate")
-            return
+    try:
+        if args.discover:
+            asyncio.run(cmd_discover(config))
+        elif args.calibrate:
+            asyncio.run(cmd_calibrate(config))
+        elif args.setup_remote_unlock:
+            cmd_setup_remote_unlock(config)
+        elif args.show_remote_unlock:
+            cmd_show_remote_unlock(config)
+        elif args.set_password:
+            cmd_set_password()
+        elif args.cli:
+            asyncio.run(run_cli_mode(config))
+        else:
+            if BLEProximityScanner is None:
+                show_startup_error(
+                    f"缺少 BLE 依赖，应用无法启动。\n\n{SCANNER_IMPORT_ERROR}\n\n"
+                    "请在 macOS 终端执行:\n"
+                    "pip install -r requirements.txt"
+                )
+                return
 
-        run_menu_bar_app(config)
+            if not config.get("device_uuid"):
+                if SetupWizard is None:
+                    show_startup_error(
+                        "尚未完成初始设置，但设置向导加载失败。\n"
+                        "请在终端运行:\n"
+                        "python main.py --discover\n"
+                        "python main.py --calibrate"
+                    )
+                    return
+
+                wizard = SetupWizard(config)
+                configured = wizard.run()
+                if not configured or not config.get("device_uuid"):
+                    show_startup_error(
+                        "初始设置尚未完成，应用本次不会继续启动。\n"
+                        "请重新打开应用并完成设备绑定。"
+                    )
+                    return
+
+            run_menu_bar_app(config)
+    except Exception as exc:
+        details = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        show_startup_error(
+            "应用启动失败。\n\n"
+            f"{details}\n\n"
+            "如果你是从终端启动，也可以直接查看终端输出定位问题。"
+        )
+        print(traceback.format_exc())
+        return
 
 
 if __name__ == "__main__":
