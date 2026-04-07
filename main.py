@@ -154,6 +154,8 @@ class ProximityLockApp:
         self._presence_armed = False
         self._presence_confirm_count = 0
         self._unconfirmed_away_since = None
+        self._armed_missing_since = None
+        self._armed_missing_count = 0
         self.remote_unlock_service = RemoteUnlockService(
             config,
             can_unlock=self._can_remote_unlock,
@@ -236,6 +238,8 @@ class ProximityLockApp:
         self._presence_armed = False
         self._presence_confirm_count = 0
         self._unconfirmed_away_since = None
+        self._armed_missing_since = None
+        self._armed_missing_count = 0
 
     def _presence_confirm_threshold(self):
         """判定手机“确实在身边”的 RSSI 门槛"""
@@ -280,6 +284,33 @@ class ProximityLockApp:
                 f"{reason} 持续 {elapsed:.1f} 秒，判定为离开"
             )
 
+    def _reset_armed_missing_tracking(self):
+        """手机已确认在附近后，命中一次就清空漏检计数"""
+        self._armed_missing_since = None
+        self._armed_missing_count = 0
+
+    def _track_armed_missing(self):
+        """
+        已确认手机在附近后，不再用“1-2 秒没扫到”作为离开证据。
+        必须连续多个完整扫描窗口都漏检，且总时长达到阈值，才判定离开。
+        """
+        now = time.time()
+        if self._armed_missing_since is None:
+            self._armed_missing_since = now
+            self._armed_missing_count = 1
+        else:
+            self._armed_missing_count += 1
+
+        elapsed = now - self._armed_missing_since
+        if (
+            self._armed_missing_count >= self.config["armed_missing_scan_limit"]
+            and elapsed >= self.config["armed_missing_lock_seconds"]
+        ):
+            self.state_machine.lock_now(
+                f"已确认手机在附近后，连续 {self._armed_missing_count} 个扫描窗口"
+                f" 共 {elapsed:.1f} 秒未检测到手机"
+            )
+
     def _reset_presence_from_local_activity(self):
         """本地有输入时，停止 BLE 检测并静默复位为“人在电脑旁”"""
         was_reset = (
@@ -306,7 +337,7 @@ class ProximityLockApp:
             self._current_rssi = None
             self._current_filtered = self.signal_processor.current_value
             if self._presence_armed:
-                self.state_machine.update(None)
+                self._track_armed_missing()
             else:
                 self._track_unconfirmed_away("空闲检测期间未检测到手机")
             return
@@ -319,6 +350,7 @@ class ProximityLockApp:
             update_state_machine=did_update_state_machine,
         )
         self._arm_presence_if_needed(filtered)
+        self._reset_armed_missing_tracking()
 
         if filtered is None:
             return
@@ -433,7 +465,7 @@ class ProximityLockApp:
                 f"  ⌛ 空闲:{self._last_idle_seconds:>4.1f}s | "
                 f"{mode} | 原始:{raw:>8} | 滤波:{filtered:>10} | "
                 f"{self.state_machine.status_text} | armed:{'Y' if self._presence_armed else 'N'} "
-                f"| confirm:{self._presence_confirm_count}{outlier}"
+                f"| confirm:{self._presence_confirm_count} | miss:{self._armed_missing_count}{outlier}"
             )
 
     def stop(self):
