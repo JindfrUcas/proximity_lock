@@ -156,6 +156,7 @@ class ProximityLockApp:
         self._unconfirmed_away_since = None
         self._armed_missing_since = None
         self._armed_missing_count = 0
+        self._last_confirmed_nearby_at = None
         self.remote_unlock_service = RemoteUnlockService(
             config,
             can_unlock=self._can_remote_unlock,
@@ -261,10 +262,13 @@ class ProximityLockApp:
                 and self._presence_confirm_count >= self.config["presence_confirm_samples"]
             ):
                 self._presence_armed = True
+                self._last_confirmed_nearby_at = time.time()
                 self.state_machine.mark_present("空闲检测确认手机在附近")
                 print(
                     f"[BLE] 已确认手机在附近（{self._presence_confirm_count} 次, {filtered:.0f}dBm）"
                 )
+        if self._presence_armed:
+            self._last_confirmed_nearby_at = time.time()
         else:
             self._presence_confirm_count = 0
 
@@ -323,7 +327,10 @@ class ProximityLockApp:
         self._idle_detection_active = False
         self._current_rssi = None
         self._current_filtered = None
+        had_recent_presence = self._presence_armed
         self._reset_idle_presence_tracking()
+        if had_recent_presence:
+            self._last_confirmed_nearby_at = time.time()
         self.signal_processor.reset()
         self.state_machine.mark_present("检测到本地操作")
 
@@ -426,6 +433,14 @@ class ProximityLockApp:
                 self.signal_processor.reset()
                 self._current_rssi = None
                 self._current_filtered = None
+                if (
+                    self._last_confirmed_nearby_at is not None
+                    and (time.time() - self._last_confirmed_nearby_at)
+                    <= self.config["recent_presence_memory_seconds"]
+                ):
+                    self._presence_armed = True
+                    self._presence_confirm_count = self.config["presence_confirm_samples"]
+                    print("[BLE] 复用最近一次“手机在附近”的记忆，避免空闲切换时误判")
                 print(
                     f"[活动] 本地已空闲 {idle_seconds:.1f} 秒，开始快速 BLE 离开检测"
                 )

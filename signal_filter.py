@@ -147,6 +147,11 @@ class SignalProcessor:
         """
         self.total_count += 1
 
+        # 一些 BLE 栈会用 127/-127 代表“RSSI 无效”
+        if raw_rssi is None or raw_rssi > 0 or raw_rssi < -120:
+            self.outlier_count += 1
+            return self.filter.value, False
+
         if self.outlier_detector.is_outlier(raw_rssi, list(self.raw_history)):
             self.outlier_count += 1
             return self.filter.value, False
