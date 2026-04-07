@@ -21,6 +21,7 @@ class BLEProximityScanner:
         self.config = config
         self._scanner = None
         self._target_uuid = config.get("device_uuid")
+        self._target_name = config.get("device_name")
         self._on_rssi_update = None
         self._on_device_found = None
         self._on_signal_lost = None
@@ -31,6 +32,31 @@ class BLEProximityScanner:
         """设置要监控的目标设备 UUID"""
         self._target_uuid = uuid
         self.config["device_uuid"] = uuid
+
+    def _target_matches(self, device, advertisement_data, allow_name_fallback=True):
+        """
+        iPhone 可能发生 BLE 地址轮换。
+        优先匹配已知地址；如果地址变了，则允许通过设备名 + Apple 厂商数据回认。
+        """
+        if self._target_uuid and device.address == self._target_uuid:
+            return True
+
+        if not allow_name_fallback or not self._target_name:
+            return False
+
+        name = device.name or advertisement_data.local_name
+        if not name or name != self._target_name:
+            return False
+
+        manufacturer_data = advertisement_data.manufacturer_data or {}
+        if 0x004C not in manufacturer_data:
+            return False
+
+        if self._target_uuid and device.address != self._target_uuid:
+            print(f"[BLE] 检测到地址轮换: {self._target_uuid} -> {device.address}")
+        self._target_uuid = device.address
+        self.config["device_uuid"] = device.address
+        return True
 
     async def discover_devices(self, duration=5.0):
         """
@@ -105,7 +131,7 @@ class BLEProximityScanner:
         strongest = {"rssi": None, "name": None}
 
         def detection_callback(device, advertisement_data):
-            if device.address == self._target_uuid:
+            if self._target_matches(device, advertisement_data):
                 self._last_seen_time = time.time()
                 rssi = advertisement_data.rssi
                 name = device.name or advertisement_data.local_name or "iPhone"
@@ -121,6 +147,50 @@ class BLEProximityScanner:
         if strongest["rssi"] is None:
             return None
         return strongest["rssi"], strongest["name"]
+
+    async def debug_probe(self, duration=12.0, scan_window=None):
+        """
+        CLI 调试：持续输出目标设备是否被匹配到，以及 RSSI。
+        """
+        if not self._target_uuid and not self._target_name:
+            print("[BLE] 未设置目标设备，无法调试扫描")
+            return []
+
+        scan_window = scan_window or self.config.get("scan_duration", 1.5)
+        deadline = time.time() + duration
+        samples = []
+
+        while time.time() < deadline:
+            strongest = {"rssi": None, "name": None, "address": None}
+
+            def detection_callback(device, advertisement_data):
+                if self._target_matches(device, advertisement_data):
+                    rssi = advertisement_data.rssi
+                    name = device.name or advertisement_data.local_name or "iPhone"
+                    if strongest["rssi"] is None or rssi > strongest["rssi"]:
+                        strongest["rssi"] = rssi
+                        strongest["name"] = name
+                        strongest["address"] = device.address
+
+            scanner = BleakScanner(detection_callback=detection_callback)
+            await scanner.start()
+            await asyncio.sleep(max(scan_window, 0.1))
+            await scanner.stop()
+
+            ts = time.strftime("%H:%M:%S")
+            if strongest["rssi"] is None:
+                print(f"[{ts}] 未扫到目标设备")
+                samples.append(None)
+            else:
+                print(
+                    f"[{ts}] 命中 {strongest['name']} {strongest['address']} "
+                    f"{strongest['rssi']}dBm"
+                )
+                samples.append((strongest["rssi"], strongest["name"], strongest["address"]))
+
+            await asyncio.sleep(max(self.config.get("idle_scan_pause", 0.05), 0.1))
+
+        return samples
 
     async def _scan_once(self):
         """执行一次扫描并分发回调"""

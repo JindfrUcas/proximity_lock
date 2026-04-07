@@ -21,7 +21,7 @@ from pathlib import Path
 
 from activity_monitor import ActivityMonitor
 from calibration import Calibrator
-from config import Config
+from config import CONFIG_FILE, Config
 from remote_auth import (
     RemoteUnlockService,
     build_otpauth_uri,
@@ -128,12 +128,13 @@ def show_startup_error(message, title="ProximityLock", include_log_hint=True):
 class ProximityLockApp:
     """主应用：连接所有模块"""
 
-    def __init__(self, config):
+    def __init__(self, config, no_lock=False):
         if BLEProximityScanner is None:
             raise RuntimeError(
                 f"缺少 BLE 依赖，无法启动监控: {SCANNER_IMPORT_ERROR}"
             )
         self.config = config
+        self.no_lock = no_lock
         self.signal_processor = SignalProcessor(config)
         self.scanner = BLEProximityScanner(config)
         self.activity_monitor = ActivityMonitor()
@@ -162,6 +163,9 @@ class ProximityLockApp:
     def _on_lock(self, reason):
         """锁屏回调"""
         print(f"\n[锁屏] 原因: {reason}")
+        if self.no_lock:
+            print("[锁屏] CLI 调试模式，不执行真实锁屏")
+            return
         if self.config["auto_lock_enabled"]:
             lock_screen()
         if self.config["notification_enabled"]:
@@ -428,7 +432,8 @@ class ProximityLockApp:
             print(
                 f"  ⌛ 空闲:{self._last_idle_seconds:>4.1f}s | "
                 f"{mode} | 原始:{raw:>8} | 滤波:{filtered:>10} | "
-                f"{self.state_machine.status_text}{outlier}"
+                f"{self.state_machine.status_text} | armed:{'Y' if self._presence_armed else 'N'} "
+                f"| confirm:{self._presence_confirm_count}{outlier}"
             )
 
     def stop(self):
@@ -555,9 +560,9 @@ def run_menu_bar_app(config):
     menu_app.run()
 
 
-async def run_cli_mode(config):
+async def run_cli_mode(config, no_lock=False):
     """命令行模式（调试用）"""
-    app = ProximityLockApp(config)
+    app = ProximityLockApp(config, no_lock=no_lock)
 
     def signal_handler(sig, frame):
         app.stop()
@@ -566,6 +571,52 @@ async def run_cli_mode(config):
     signal.signal(signal.SIGINT, signal_handler)
 
     await app.run_monitor()
+
+
+async def cmd_doctor(config):
+    """CLI 诊断：检查配置、权限、活动监控和 BLE 扫描"""
+    print("\n===== ProximityLock Doctor =====")
+    print(f"配置文件: {CONFIG_FILE}")
+    print(f"device_name: {config.get('device_name')}")
+    print(f"device_uuid: {config.get('device_uuid')}")
+    print(f"idle_grace_seconds: {config['idle_grace_seconds']}")
+    print(f"idle_scan_window: {config['idle_scan_window']}")
+    print(f"lock_rssi: {config['lock_rssi']}")
+    print(f"signal_lost_timeout: {config['signal_lost_timeout']}")
+    print(f"presence_confirm_samples: {config['presence_confirm_samples']}")
+    print(f"presence_confirm_min_rssi: {config['presence_confirm_min_rssi']}")
+    print(f"unconfirmed_away_lock_seconds: {config['unconfirmed_away_lock_seconds']}")
+
+    activity_monitor = ActivityMonitor()
+    print(f"activity_monitor.available: {activity_monitor.available}")
+    if activity_monitor.available:
+        print(f"当前空闲秒数: {activity_monitor.get_idle_seconds():.2f}")
+
+    print(f"当前是否锁屏: {is_screen_locked()}")
+
+    if BLEProximityScanner is None:
+        print(f"❌ 缺少 BLE 依赖: {SCANNER_IMPORT_ERROR}")
+        return
+    if not config.get("device_uuid") and not config.get("device_name"):
+        print("❌ 未配置目标设备，请先运行 python main.py --discover")
+        return
+
+    print("\n[Doctor] 开始连续扫描 12 秒，不会锁屏")
+    scanner = BLEProximityScanner(config)
+    samples = await scanner.debug_probe(duration=12.0, scan_window=config["scan_duration"])
+    hits = [sample for sample in samples if sample is not None]
+    print(f"\n[Doctor] 扫描完成: {len(hits)}/{len(samples)} 次命中目标设备")
+    if hits:
+        strongest = max(hits, key=lambda item: item[0])
+        weakest = min(hits, key=lambda item: item[0])
+        print(f"[Doctor] 最强 RSSI: {strongest[0]}dBm")
+        print(f"[Doctor] 最弱 RSSI: {weakest[0]}dBm")
+    else:
+        print("[Doctor] 一次都没扫到目标设备。优先检查:")
+        print("  1. iPhone 蓝牙是否打开")
+        print("  2. discover 选中的设备是否就是这台 iPhone")
+        print("  3. iPhone 名称是否变化")
+        print("  4. 是否出现地址轮换且历史配置不匹配")
 
 
 async def cmd_discover(config):
@@ -698,6 +749,8 @@ def main():
     parser.add_argument("--setup-remote-unlock", action="store_true", help="生成动态码密钥并启用远程授权解锁")
     parser.add_argument("--show-remote-unlock", action="store_true", help="显示远程授权地址与认证器密钥")
     parser.add_argument("--cli", action="store_true", help="命令行模式运行")
+    parser.add_argument("--no-lock", action="store_true", help="CLI 调试时只打印状态，不真正锁屏")
+    parser.add_argument("--doctor", action="store_true", help="做一次完整 CLI 诊断，不锁屏")
     parser.add_argument(
         "--filter",
         choices=["mean", "median", "ema", "kalman"],
@@ -722,8 +775,19 @@ def main():
             cmd_show_remote_unlock(config)
         elif args.set_password:
             cmd_set_password()
+        elif args.doctor:
+            asyncio.run(cmd_doctor(config))
         elif args.cli:
-            asyncio.run(run_cli_mode(config))
+            if not config.get("device_uuid") and not config.get("device_name"):
+                show_startup_error(
+                    "CLI 监控前还没有配置目标设备。\n\n"
+                    "请先执行:\n"
+                    "python main.py --discover\n"
+                    "python main.py --calibrate",
+                    include_log_hint=False,
+                )
+                return
+            asyncio.run(run_cli_mode(config, no_lock=args.no_lock))
         else:
             if BLEProximityScanner is None:
                 show_startup_error(

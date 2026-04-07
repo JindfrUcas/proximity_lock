@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
 
     # ---- 扫描 ----
     "scan_interval": 2.0,          # discover / calibrate 使用
+    "scan_duration": 1.5,          # CLI doctor / 兼容 iPhone 较慢广播
 
     # ---- 功能开关 ----
     "auto_lock_enabled": True,
@@ -74,6 +75,9 @@ DEFAULT_CONFIG = {
     "remote_unlock_max_attempts": 5,
     "remote_unlock_lockout_seconds": 300,
     "remote_unlock_session_minutes": 15,
+
+    # ---- 调试 ----
+    "debug_logging": False,
 }
 
 
